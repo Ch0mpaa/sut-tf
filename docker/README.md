@@ -11,6 +11,26 @@ and lets us pin exact Zig + CUDA versions in a reproducible image.
 - Build script (`build-sut-tf.sh`): placeholder, fails loudly until the
   engine source is imported into `../engine/`
 
+## When to use this (and when not)
+
+**Not for daily development.** This LXC has no GPU passthrough, so a
+container build can never smoke-test the binary against a real 3090. Every
+iteration becomes compile-here → `scp` → restart service on ailab → test,
+which is a slow loop.
+
+**Daily development happens on ailab directly** (where the 3090 lives). This
+Dockerfile exists to give us a reproducible release recipe once the ailab
+build is working — a way to pin exact toolchain versions for the article's
+reproducibility section and for CI if we ever add it.
+
+Workflow:
+1. Iterate the engine source and build on ailab until it compiles and serves
+2. Record the exact Zig + CUDA + kernel versions that worked
+3. Mirror those into this Dockerfile and verify the container produces a
+   byte-equivalent binary
+4. The container recipe becomes the "frozen" build for publication; ailab
+   stays the dev loop
+
 ## Intended workflow (planned)
 
 ```sh
