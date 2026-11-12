@@ -34,9 +34,12 @@ To be filled in when we import. Will record:
 
 - Upstream source: `machinegenieorg/TensorFold@<commit>` with PR #836 merged in
 - Commit hash
-- Zig version used to build
-- CUDA version used to build
-- Driver version on target (ailab RTX 3090)
+- Zig version used to build — **currently pinned to 0.17.0** in
+  `docker/Dockerfile.builder`, mirroring the `.zig-version` file that
+  TensorFold's `build.zig` enforces at `comptime`. If upstream bumps,
+  we bump in the same commit.
+- CUDA version used to build (target: 12.4+)
+- Driver version on target (ailab RTX 3090: driver 615.71.09, CUDA UMD 13.4)
 
 ## Per-file attribution
 

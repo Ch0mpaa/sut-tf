@@ -22,17 +22,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Zig toolchain. Version set once first successful SUT-TF build is reproduced.
-# TensorFold README specifies the required Zig version; until we have confirmed
-# that from the upstream source, we ship with a placeholder that fails loudly.
-ENV ZIG_VERSION=UNPINNED
-RUN if [ "$ZIG_VERSION" = "UNPINNED" ]; then \
-      echo "ERROR: ZIG_VERSION not set; see docker/Dockerfile.builder header." >&2 ; \
-      exit 42 ; \
-    fi && \
-    curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" \
+# Zig toolchain.
+#
+# Pinned to match ashhart/TensorFold's own .zig-version file. Their build.zig
+# has a compile-time check that @compileErrors if Zig doesn't exactly match.
+# When upstream bumps .zig-version, bump this pin to the same value in the
+# same commit — never guess, always mirror.
+#
+# Current pin confirmed 2026-11-11 against:
+#   https://raw.githubusercontent.com/ashhart/TensorFold/main/.zig-version
+ENV ZIG_VERSION=0.17.0
+RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" \
       | tar -xJ -C /opt && \
-    ln -s "/opt/zig-linux-x86_64-${ZIG_VERSION}/zig" /usr/local/bin/zig
+    ln -s "/opt/zig-linux-x86_64-${ZIG_VERSION}/zig" /usr/local/bin/zig && \
+    zig version
 
 WORKDIR /work
 
