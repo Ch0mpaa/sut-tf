@@ -1,0 +1,41 @@
+# Build artifacts
+build/
+dist/
+*.o
+*.so
+*.ko
+zig-cache/
+zig-out/
+target/
+
+# Benchmark outputs (results checked in explicitly)
+benchmarks/results/*.json
+benchmarks/results/*.csv
+benchmarks/results/scratch/
+benchmarks/corpora/raw/
+benchmarks/corpora/synthesized/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Model weights (never commit)
+*.safetensors
+*.gguf
+*.bin
+*.pt
+weights/
+
+# Secrets
+.env
+*.pem
+*.key

@@ -1,0 +1,17 @@
+SUT-TF
+Copyright 2026 Ch0mpaa
+
+This product includes software developed as a derivative work of:
+
+  TensorFold
+  Copyright (c) ashhart and TensorFold contributors
+  Licensed under the Apache License, Version 2.0
+  https://github.com/ashhart/TensorFold
+
+  TensorFold 3090 CUDA kernel stack (PRs #608, #3, #4 on machinegenieorg/TensorFold,
+  consolidated into ashhart PR #836)
+  Copyright (c) CanadaApollo6 and TensorFold contributors
+  Licensed under the Apache License, Version 2.0
+
+Modifications made for SUT-TF are documented in CHANGELOG.md and in
+per-file change notices as required by the Apache License.
