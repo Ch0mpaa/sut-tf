@@ -26,15 +26,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #
 # Pinned to match ashhart/TensorFold's own .zig-version file. Their build.zig
 # has a compile-time check that @compileErrors if Zig doesn't exactly match.
-# When upstream bumps .zig-version, bump this pin to the same value in the
-# same commit — never guess, always mirror.
+# When upstream bumps .zig-version, bump this pin AND the SHA below to the
+# same values in the same commit — never guess, always mirror.
 #
-# Current pin confirmed 2026-11-11 against:
-#   https://raw.githubusercontent.com/ashhart/TensorFold/main/.zig-version
-ENV ZIG_VERSION=0.17.0
-RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" \
-      | tar -xJ -C /opt && \
-    ln -s "/opt/zig-linux-x86_64-${ZIG_VERSION}/zig" /usr/local/bin/zig && \
+# Values confirmed 2026-11-11 against:
+#   https://ziglang.org/download/index.json  -> 0.17.0 -> x86_64-linux
+#
+# Note: Zig flipped its tarball naming from `zig-linux-x86_64-...` to
+# `zig-x86_64-linux-...` recently; mirror whatever the index says.
+ENV ZIG_VERSION=0.17.0 \
+    ZIG_SHA256=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
+RUN set -eux; \
+    tarball="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"; \
+    curl -fsSL -o "/tmp/${tarball}" "https://ziglang.org/download/${ZIG_VERSION}/${tarball}"; \
+    echo "${ZIG_SHA256}  /tmp/${tarball}" | sha256sum -c -; \
+    tar -xJ -C /opt -f "/tmp/${tarball}"; \
+    rm "/tmp/${tarball}"; \
+    ln -s "/opt/zig-x86_64-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig; \
     zig version
 
 WORKDIR /work
