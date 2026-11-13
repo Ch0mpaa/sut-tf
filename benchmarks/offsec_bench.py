@@ -1,6 +1,7 @@
 """offsec-v1: one recon dump, several questions in a row, exact-answer scoring.
-Usage: offsec_bench.py PORT TAG [TARGET_TOKENS]"""
-import json, random, re, sys, time, urllib.request
+Usage: offsec_bench.py PORT TAG [TARGET_TOKENS]
+OFFSEC_TEMPERATURE=0 sends a fixed temperature (greedy) so token hashes can be compared across servers."""
+import json, os, random, re, sys, time, urllib.request
 
 PORT, TAG = sys.argv[1], sys.argv[2]
 TARGET = int(sys.argv[3]) if len(sys.argv) > 3 else 80_000
@@ -74,9 +75,15 @@ Q = [
 ]
 
 
+TEMPERATURE = os.environ.get("OFFSEC_TEMPERATURE")
+
+
 def ask(question, max_tokens):
-    body = json.dumps({"model": "redops-abliterated", "max_tokens": max_tokens,
-                       "messages": [{"role": "user", "content": dump + "\n\n" + question}]}).encode()
+    req = {"model": "redops-abliterated", "max_tokens": max_tokens,
+           "messages": [{"role": "user", "content": dump + "\n\n" + question}]}
+    if TEMPERATURE is not None:
+        req["temperature"] = float(TEMPERATURE)
+    body = json.dumps(req).encode()
     t0 = time.time()
     with urllib.request.urlopen(urllib.request.Request(URL, body, {"Content-Type": "application/json"}), timeout=1800) as r:
         d = json.load(r)
@@ -99,10 +106,10 @@ for name, q, check, mt in Q:
     row = dict(q=name, ok=ok, score=score, prompt_tokens=u["prompt_tokens"],
                cached=(u.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
                ttft=tf.get("time_to_first_token"), prefill=tf.get("prefill_seconds"), tps=tf.get("tokens_per_second"),
-               out=u["completion_tokens"], wall=wall,
+               out=u["completion_tokens"], wall=wall, sha=tf.get("token_sha"),
                answer=a[:240].replace(api_key, "sk_live_<planted-key-redacted>"))
     res.append(row)
     print(f"[{TAG}] {name:9} {score:24} prompt={row['prompt_tokens']} cached={row['cached']} "
-          f"ttft={row['ttft'] or 0:7.2f}s decode={row['tps'] or 0:6.1f} tok/s out={row['out']} wall={wall:7.1f}s", flush=True)
+          f"ttft={row['ttft'] or 0:7.2f}s decode={row['tps'] or 0:6.1f} tok/s out={row['out']} wall={wall:7.1f}s sha={row['sha']}", flush=True)
 json.dump(res, open(f"/home/chris/bench-receipts/offsec/{TAG}.json", "w"), indent=1)
 print(f"[{TAG}] DONE correct={sum(r['ok'] for r in res)}/{len(res)} total_wall={sum(r['wall'] for r in res):.0f}s", flush=True)

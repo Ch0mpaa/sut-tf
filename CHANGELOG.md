@@ -5,6 +5,12 @@ modified-file notices; this changelog tracks the per-release view.
 
 ## Unreleased
 
+- `patches/0001-qwen27-CUDA-keep-and-resume-prompt-states-in-the-sha.patch`: prompt cache for the qwen27
+  CUDA engine (M3TiS has none). Follow-up questions on a 79K-token dump answer in 1.7–2.1 s instead of
+  ~77 s; a four-question offsec-v1 session takes 83 s versus 365 s for M3TiS defaults. Greedy answers are
+  token-identical with the cache on and off. Results: `benchmarks/results/2026-11-13-prompt-cache/`.
+- `benchmarks/offsec_bench.py`: `OFFSEC_TEMPERATURE` for greedy runs, token hashes recorded.
+
 - `configs/offsec.conf`: the sut-offsec serving profile (131K window, 4096-row prompt chunks, loop
   guard, 4-bit KV, DFlash2). 13% less session time than M3TiS's defaults on offsec-v1, same accuracy.
   Results: `benchmarks/results/2026-11-13-offsec-v1/`.
