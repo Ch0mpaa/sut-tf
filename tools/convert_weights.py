@@ -1,12 +1,23 @@
-"""Convert YCF-AI abliterated oQ4e MLX weights into the exact tensor layout of
-Vontra/Qwen3.8-27B-MLX-4bit (uniform affine 4-bit, group 64, bf16 scales/biases/norms),
-which is what the M3TiS sm86 build loads."""
-import glob, json, os, shutil, struct, sys, time
+"""Convert a mixed-precision MLX checkpoint into a reference checkpoint's exact tensor layout:
+uniform affine 4-bit (group 64) weights and bf16 scales, biases and unquantized tensors.
+
+For every tensor the reference has, the output gets the source's values in the reference's dtype and shape:
+- same shape and dtype: copied
+- same shape, f16/f32 where the reference has bf16: cast
+- a quantized module whose packed width differs (5/6/8-bit in the source): dequantized with the source's
+  per-module bits from its config.json, then requantized to 4-bit group 64 (weight, scales and biases together)
+Tensors only the source has (for example an MTP head) are dropped. Non-weight files come from the reference.
+
+Usage: convert_weights.py --src SRC_DIR --ref REF_DIR --out OUT_DIR"""
+import argparse, glob, json, os, shutil, struct, sys, time
 import numpy as np
 
-SRC = glob.glob("/srv/models/huggingface/hub/models--YCF-AI--*/snapshots/*")[0]
-REF = glob.glob("/srv/models/huggingface/hub/models--Vontra--*/snapshots/*")[0]
-OUT = sys.argv[1] if len(sys.argv) > 1 else "/home/chris/models/qwen38-27b-ablit-m3tis"
+_ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+_ap.add_argument("--src", required=True, help="source checkpoint directory (mixed-precision MLX safetensors)")
+_ap.add_argument("--ref", required=True, help="reference checkpoint directory with the target layout")
+_ap.add_argument("--out", required=True, help="output directory")
+_args = _ap.parse_args()
+SRC, REF, OUT = _args.src, _args.ref, _args.out
 CHUNK = 2048
 
 DT = {"F16": np.float16, "BF16": np.uint16, "F32": np.float32, "U32": np.uint32}
@@ -153,7 +164,7 @@ def main():
                     c_ref = corr(sample_x[1], rx)
                     c_self = corr(sample_x[1], sample_x[0])
                     worst.append((c_ref, c_self, module, bits))
-                    print(f"  requant {module} {bits}b->4b corr(vs vontra)={c_ref:.4f} corr(vs src)={c_self:.5f}", flush=True)
+                    print(f"  requant {module} {bits}b->4b corr(vs ref)={c_ref:.4f} corr(vs src)={c_self:.5f}", flush=True)
                     done_requant.add(module)
                     globals().setdefault("_conv", {})[module] = conv
                 data = globals()["_conv"][module][leaf]
@@ -185,7 +196,7 @@ def main():
 
     print("stats", stats)
     worst.sort()
-    print("lowest corr vs vontra:")
+    print("lowest corr vs ref:")
     for c_ref, c_self, m, bits in worst[:8]:
         print(f"  {c_ref:.4f} (self {c_self:.5f}) {bits}b {m}")
     print(f"done in {time.time() - t0:.0f}s -> {OUT}")

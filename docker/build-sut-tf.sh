@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Build SUT-TF inside the CUDA + Zig container. Placeholder.
-#
-# Wires up once we import the source tree. Current behavior: fail loudly so no
-# one thinks this works yet.
+# Build the patched engine inside the builder image. Run from the engine checkout:
+#   docker run --rm --gpus all --user "$(id -u):$(id -g)" -e HOME=/tmp -e ZIG_GLOBAL_CACHE_DIR=/src/.zig-global-cache \
+#     -v "$PWD":/src -w /src sut-tf-builder:0.1 build-sut-tf.sh
+# Output: zig-out-host/native/bin/tensorfold-native for RTX 30-series (sm_86).
 set -euo pipefail
 
-echo "ERROR: build-sut-tf.sh is a placeholder. Source tree not imported." >&2
-echo "       See docs/LINEAGE.md for the planned base commit." >&2
-exit 42
+zig build native -Dcpu=x86_64_v3 -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=86 --prefix /src/zig-out-host
+ls -la /src/zig-out-host/native/bin/tensorfold-native

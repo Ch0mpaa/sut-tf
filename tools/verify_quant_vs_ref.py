@@ -1,5 +1,15 @@
-import glob, json, struct, re, collections
+"""Check a converted checkpoint against its reference: dequantize every quantized module (first 256 rows) in both
+and report the lowest correlation per module class. A conversion bug shows as near-zero correlation; a sound
+4-bit conversion of a lightly edited model sits near 0.99.
+
+Usage: verify_quant_vs_ref.py --converted DIR --ref DIR"""
+import argparse, glob, json, struct, re, collections
 import numpy as np
+
+_ap = argparse.ArgumentParser()
+_ap.add_argument("--converted", required=True)
+_ap.add_argument("--ref", required=True)
+_args = _ap.parse_args()
 
 def index(snap):
     t = {}
@@ -29,8 +39,8 @@ def deq4(w, s, b):
     q = q.reshape(rows, s.shape[1], -1)
     return (q * s[:, :, None].astype(np.float32) + b[:, :, None].astype(np.float32)).reshape(rows, -1)
 
-new = index("/home/chris/models/qwen38-27b-ablit-m3tis")
-ref = index(glob.glob("/srv/models/huggingface/hub/models--Vontra--*/snapshots/*")[0])
+new = index(_args.converted)
+ref = index(_args.ref)
 groups = collections.defaultdict(list)
 for k in ref:
     if not k.endswith(".scales"):

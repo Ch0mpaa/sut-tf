@@ -1,17 +1,16 @@
 SUT-TF
-Copyright 2026 Ch0mpaa
+Copyright 2026 Ch0mpaa (Screwed Up Tech)
 
-This product includes software developed as a derivative work of:
-
-  TensorFold
-  Copyright (c) ashhart and TensorFold contributors
-  Licensed under the Apache License, Version 2.0
+The engine patch in patches/ modifies, and the recipe builds on, TensorFold (Apache License 2.0):
   https://github.com/ashhart/TensorFold
-
-  TensorFold 3090 CUDA kernel stack (PRs #608, #3, #4 on machinegenieorg/TensorFold,
-  consolidated into ashhart PR #836)
+  Copyright (c) ashhart and TensorFold contributors
+  RTX 3090 CUDA branch: https://github.com/CanadaApollo6/TensorFold (commit c7c3f7c8)
   Copyright (c) CanadaApollo6 and TensorFold contributors
-  Licensed under the Apache License, Version 2.0
 
-Modifications made for SUT-TF are documented in CHANGELOG.md and in
-per-file change notices as required by the Apache License.
+Models the recipe downloads (not redistributed here):
+  Qwen/Qwen3.8-27B (base model)
+  YCF-AI/Qwen3.8-27B-Huihui-abliterated-oQ4e-MTP-FP16-MLX (abliterated weights)
+  Vontra/Qwen3.8-27B-MLX-4bit (4-bit tensor layout reference)
+  z-lab/Qwen3.8-27B-DFlash2 (drafter)
+
+Files the patch adds or modifies carry a change notice. CHANGELOG.md lists the changes.

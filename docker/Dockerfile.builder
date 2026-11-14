@@ -1,11 +1,6 @@
-# CUDA + Zig builder image for SUT-TF.
-#
-# Built and run on aipwnlocal LXC 110 ("dockers", 192.168.60.37).
-# Produces a tensorfold-native binary targeted at RTX 3090 (sm_86).
-#
-# Not final. The CUDA / Zig versions get pinned once the first successful
-# build is made; the comment next to each pin records the commit hash of the
-# TensorFold source they built.
+# CUDA 12.4 + Zig 0.17.0 builder image for the patched engine (RTX 3090, sm_86).
+#   docker build -t sut-tf-builder:0.1 -f Dockerfile.builder .
+# These pins are what built the binary in benchmarks/results.
 FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -22,18 +17,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Zig toolchain.
-#
-# Pinned to match ashhart/TensorFold's own .zig-version file. Their build.zig
-# has a compile-time check that @compileErrors if Zig doesn't exactly match.
-# When upstream bumps .zig-version, bump this pin AND the SHA below to the
-# same values in the same commit — never guess, always mirror.
-#
-# Values confirmed 2026-11-11 against:
-#   https://ziglang.org/download/index.json  -> 0.17.0 -> x86_64-linux
-#
-# Note: Zig flipped its tarball naming from `zig-linux-x86_64-...` to
-# `zig-x86_64-linux-...` recently; mirror whatever the index says.
+# Zig toolchain. The engine's build refuses any other Zig version, so this must match the
+# checkout's .zig-version. SHA from https://ziglang.org/download/index.json.
 ENV ZIG_VERSION=0.17.0 \
     ZIG_SHA256=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
 RUN set -eux; \

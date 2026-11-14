@@ -1,0 +1,2 @@
+0e208d7adae906f45241528463467bd3  tensorfold-native  S0_baseline S1_offsec S2b_vram_cache (before the resumed-read matmul fix)
+ea0c7cefc8975ceabe1174366de7daef  tensorfold-native  S3c_final G_nocache262 (the published patch)

@@ -1,0 +1,12 @@
+question   cached tokens     cached sha       cold sha  result
+noauth             78848   9df599085c48   9df599085c48  IDENTICAL
+live_key           78848   75726557a1fc   75726557a1fc  IDENTICAL
+redis_cve          78848   7927ec415bbb   7927ec415bbb  IDENTICAL
+admin_pw           78848   7927ec415bbb   7927ec415bbb  IDENTICAL
+jenkins            78848   7927ec415bbb   7927ec415bbb  IDENTICAL
+ftp                78848   7927ec415bbb   7927ec415bbb  IDENTICAL
+smb                78848   220eb44b8c7d   220eb44b8c7d  IDENTICAL
+aws_key            78848   bd33c2ef61d1   bd33c2ef61d1  IDENTICAL
+apache             78848   8f553a3334b3   8f553a3334b3  IDENTICAL
+traversal          78848   e722323cd120   e722323cd120  IDENTICAL
+GATE PASS (10 distinct cached answers checked)

@@ -1,31 +1,18 @@
 # benchmarks/
 
-The measurement harness and its inputs.
+| File | What |
+|---|---|
+| `offsec_bench_v2.py` | The offsec benchmark: planted evidence with decoys, hallucination traps, drift session, refusals, power. See [../docs/METHOD.md](../docs/METHOD.md). |
+| `run_steps.sh` | Runs the benchmark once per build step, each on a fresh server, then builds the tables and runs the exactness gate |
+| `summarize_v2.py` | JSON receipts → markdown tables |
+| `exactness_gate.py` | Fails if any cached answer differs from the cold answer to the same question |
+| `results/2026-11-13-offsec-v2/` | The receipts behind [../RESULTS.md](../RESULTS.md) |
 
-## Layout
+Run one benchmark against a server that's already up (on the same host, so `nvidia-smi` sees its GPU):
 
-```
-harness.py              CLI runner: hits OpenAI-compatible endpoints,
-                        records tok/s, prefill, VRAM, needle accuracy
-config.example.yaml     Example run config (copy to config.yaml)
-needles/
-  types.py              Needle generators per type (IP, CVE, port, ...)
-  verify.py             Exact-match scoring + Wilson CI
-corpora/
-  README.md             How to produce each corpus size
-  generate_http_logs.py Synthesizer for nginx-style corpora
-  generate_bundles.py   Synthesizer for JS bundle corpora
-  generate_apidocs.py   Synthesizer for OpenAPI corpora
-results/                Per-run outputs (gitignored; commit specific runs
-                        explicitly via git add -f)
+```bash
+python3 offsec_bench_v2.py 8000 mytag --gpu 0 --out results/mine
+python3 summarize_v2.py results/mine mytag
 ```
 
-## Running a measurement
-
-Not usable yet. Scaffolding only. Will land as:
-
-```
-python benchmarks/harness.py --config benchmarks/config.yaml --tag baseline-A
-```
-
-See `docs/MEASUREMENT_PROTOCOL.md` for what the numbers mean.
+Python 3.10+ with the standard library only. `nvidia-smi` must be on PATH.

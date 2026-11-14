@@ -1,34 +1,47 @@
-From dab915a38b575c6cb274eeeef9f730ee12fe1c88 Mon Sep 17 00:00:00 2001
+From 8c278b913cd1acf5c76a401a9c753ca0c5c0f153 Mon Sep 17 00:00:00 2001
 From: Ch0mpaa <christian.gonzalez@infosystemsinc.com>
-Date: Fri, 13 Nov 2026 22:05:41 +0000
-Subject: [PATCH] qwen27 CUDA: keep and resume prompt states in the shared
- prompt cache
+Date: Sat, 14 Nov 2026 01:26:04 +0000
+Subject: [PATCH] qwen27 CUDA: prompt cache with resumable prefill and a pinned
+ host-memory tier
 
-The qwen27 CUDA family had no snapshots, so the server ran it with no prompt cache and every
-request re-read its whole prompt. reuse.zig copies a stream's committed state (DeltaNet
-recurrences and conv windows, and the attention caches' first at rows) and restores it; a pass
-with the cache in play cuts the zero-anchored grid so kept states line up. cuda.zig now takes
-each family's own snapshot functions instead of Nemotron's. Cache-off passes are unchanged.
-
-Gate: offsec-v1 greedy answers are token-identical with the cache on and off; follow-up questions
-on a 79K-token prompt resume from 77,824 cached tokens (75 s to 1.7 s).
+Keeps and resumes prompt states for the qwen27 CUDA engine. A state is a stream's DeltaNet recurrences and
+conv windows plus the first N rows of each attention layer's keys and values. A pass with the cache in play
+cuts the zero-anchored chunk grid, so kept states line up across requests, and keeps the prompt matmuls for
+every piece, so resumed passes compute the same tokens as cold ones. TF_QWEN27_HOST_CACHE_GIB=N keeps the
+states in N GiB of pinned host memory instead of the card's spare memory, which lets a 262K window cache.
 
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 ---
- zig/src/families/qwen27/cuda/engine.zig |  38 +++++++++
- zig/src/families/qwen27/cuda/lanes.zig  |  37 ++++++++-
- zig/src/families/qwen27/cuda/lone.zig   |  28 ++++++-
- zig/src/families/qwen27/cuda/native.zig |  13 ++-
- zig/src/families/qwen27/cuda/reuse.zig  | 106 ++++++++++++++++++++++++
- zig/src/native/cuda.zig                 |  21 +++--
- 6 files changed, 231 insertions(+), 12 deletions(-)
+ zig/src/families/qwen27/cuda/engine.zig |  47 ++++++++-
+ zig/src/families/qwen27/cuda/lanes.zig  |  38 ++++++-
+ zig/src/families/qwen27/cuda/lone.zig   |  33 +++++-
+ zig/src/families/qwen27/cuda/native.zig |  23 +++-
+ zig/src/families/qwen27/cuda/reuse.zig  | 134 ++++++++++++++++++++++++
+ zig/src/native/cuda.zig                 |  25 +++--
+ 6 files changed, 286 insertions(+), 14 deletions(-)
  create mode 100644 zig/src/families/qwen27/cuda/reuse.zig
 
 diff --git a/zig/src/families/qwen27/cuda/engine.zig b/zig/src/families/qwen27/cuda/engine.zig
-index b25a872f..089aacd3 100644
+index b25a872f..36629f62 100644
 --- a/zig/src/families/qwen27/cuda/engine.zig
 +++ b/zig/src/families/qwen27/cuda/engine.zig
-@@ -19,6 +19,28 @@ pub fn chunkBounds(start: usize, end: usize, size: usize, j: usize) [2]usize {
+@@ -1,4 +1,5 @@
+ //! The 27B's CUDA engine for one stream: the weights, kernels and scratch, prefill and greedy serial decode.
++//! Changed 2026-11-13 for sut-tf: resumable prefill from a saved prompt state.
+ 
+ const std = @import("std");
+ const cuda = @import("cuda");
+@@ -7,7 +8,8 @@ const kern = @import("kernels.zig");
+ const tri = @import("triton.zig");
+ const st = @import("state.zig");
+ const wts = @import("weights.zig");
+-const Forward = @import("forward.zig").Forward;
++const fwd = @import("forward.zig");
++const Forward = fwd.Forward;
+ const Part = @import("forward.zig").Part;
+ 
+ /// prefill.CHUNK: a prompt chunk's rows (prompt_rows on a GPU of 80 GB or more).
+@@ -19,6 +21,28 @@ pub fn chunkBounds(start: usize, end: usize, size: usize, j: usize) [2]usize {
      return .{ start + (end - start) * j / n, start + (end - start) * (j + 1) / n };
  }
  
@@ -57,7 +70,7 @@ index b25a872f..089aacd3 100644
  /// `streams`: a shared round's windows at most (the scratch's window rows follow); `prompt_rows`: a prompt chunk's rows.
  pub const Options = struct { context: usize, streams: usize = st.max_streams, prompt_rows: usize = prompt_rows };
  
-@@ -88,6 +110,22 @@ pub const Engine = struct {
+@@ -88,6 +112,27 @@ pub const Engine = struct {
          }
      }
  
@@ -67,6 +80,11 @@ index b25a872f..089aacd3 100644
 +        if (prompt.len == 0) return error.EmptyPrompt;
 +        if (prompt.len >= seq.capacity) return error.PromptTooLong;
 +        if (from == 0) try seq.reset(e.ops(), e.w.g) else if (!resumable(from, prompt.len, e.prompt_rows) or seq.pos != from) return error.BadReuse;
++        // a grid pass can end on a short piece the even-chunk pass never has: keep the prompt matmuls for it, so a
++        // resumed or kept pass computes the same bits as a cold one (short chunks otherwise take the decode matmuls)
++        const dense = fwd.prompt_dense_rows;
++        fwd.prompt_dense_rows = 0;
++        defer fwd.prompt_dense_rows = dense;
 +        var f = e.forward();
 +        var s: usize = from;
 +        while (s < prompt.len) {
@@ -81,10 +99,14 @@ index b25a872f..089aacd3 100644
      pub fn decode(e: *Engine, seq: *st.Seq, pending: u32, count: usize, out: *std.ArrayList(u32)) !void {
          var f = e.forward();
 diff --git a/zig/src/families/qwen27/cuda/lanes.zig b/zig/src/families/qwen27/cuda/lanes.zig
-index e73796e3..eb0499ea 100644
+index e73796e3..c2396946 100644
 --- a/zig/src/families/qwen27/cuda/lanes.zig
 +++ b/zig/src/families/qwen27/cuda/lanes.zig
-@@ -4,7 +4,9 @@ const std = @import("std");
+@@ -1,10 +1,13 @@
+ //! The 27B's CUDA engine behind the lane core: every stream's window in one verify, DFlash2 drafts in one batch.
++//! Changed 2026-11-13 for sut-tf: restores saved prompt states before prefill.
+ 
+ const std = @import("std");
  const lanes = @import("lanes");
  const c = @import("shape.zig");
  const st = @import("state.zig");
@@ -95,7 +117,7 @@ index e73796e3..eb0499ea 100644
  const Part = @import("forward.zig").Part;
  const Forward = @import("forward.zig").Forward;
  const dl = @import("draft_load.zig");
-@@ -226,14 +228,45 @@ pub const Cuda = struct {
+@@ -226,14 +229,45 @@ pub const Cuda = struct {
      }
  
      /// prefill_state into an opened stream: the prompt in chunks, a drafting stream's last window of taps absorbed.
@@ -141,7 +163,7 @@ index e73796e3..eb0499ea 100644
      /// prefill_batch: prompts in shared passes of at most a chunk's rows (a longer one alone, in its chunks).
      fn prefillMany(p: *anyopaque, streams: []const *lanes.Stream, errs: []?anyerror) !void {
          const x = cast(p);
-@@ -247,7 +280,7 @@ pub const Cuda = struct {
+@@ -247,7 +281,7 @@ pub const Cuda = struct {
                  continue;
              };
              const ids = s.prompt();
@@ -151,10 +173,16 @@ index e73796e3..eb0499ea 100644
                      x.dropSeq(s);
                      err.* = e;
 diff --git a/zig/src/families/qwen27/cuda/lone.zig b/zig/src/families/qwen27/cuda/lone.zig
-index 00f825c5..8dfd524a 100644
+index 00f825c5..be9e7e74 100644
 --- a/zig/src/families/qwen27/cuda/lone.zig
 +++ b/zig/src/families/qwen27/cuda/lone.zig
-@@ -8,7 +8,8 @@ const tree = @import("tree.zig");
+@@ -1,4 +1,5 @@
+ //! decode.draft_decode for one stream: copies from the context, else a DFlash2 tree; verify, walk, commit, absorb.
++//! Changed 2026-11-13 for sut-tf: resumable prefill from a saved prompt state.
+ 
+ const std = @import("std");
+ const lanes = @import("lanes");
+@@ -8,7 +9,8 @@ const tree = @import("tree.zig");
  const kern = @import("kernels.zig");
  const dr = @import("draft.zig");
  const dl = @import("draft_load.zig");
@@ -164,7 +192,7 @@ index 00f825c5..8dfd524a 100644
  const fw = @import("forward.zig");
  const Forward = fw.Forward;
  const Part = @import("forward.zig").Part;
-@@ -112,6 +113,31 @@ pub fn prefill(e: *Engine, seq: *st.Seq, ctx: *dr.Context, d: *dr.DFlash2, promp
+@@ -112,6 +114,35 @@ pub fn prefill(e: *Engine, seq: *st.Seq, ctx: *dr.Context, d: *dr.DFlash2, promp
      }
  }
  
@@ -174,6 +202,10 @@ index 00f825c5..8dfd524a 100644
 +    if (prompt.len == 0) return error.EmptyPrompt;
 +    if (prompt.len >= seq.capacity) return error.PromptTooLong;
 +    if (from == 0) try seq.reset(e.ops(), e.w.g) else if (!eng.resumable(from, prompt.len, e.prompt_rows) or seq.pos != from) return error.BadReuse;
++    // as Engine.prefillFrom: no decode matmuls for a short grid piece, so kept and resumed passes match cold ones
++    const dense = fw.prompt_dense_rows;
++    fw.prompt_dense_rows = 0;
++    defer fw.prompt_dense_rows = dense;
 +    ctx.len = 0;
 +    ctx.end = 0;
 +    const tap_from = @max(prompt.len -| dl.window, from);
@@ -197,10 +229,16 @@ index 00f825c5..8dfd524a 100644
  pub fn decode(e: *Engine, seq: *st.Seq, ctx: *dr.Context, d: *dr.DFlash2, prompt: []const u32, pending: u32, count: usize, max_rows: usize, out: *std.ArrayList(u32), stats: *Stats) !void {
      const gpa = e.gpa;
 diff --git a/zig/src/families/qwen27/cuda/native.zig b/zig/src/families/qwen27/cuda/native.zig
-index b41a8c54..2019bb9b 100644
+index b41a8c54..5602c913 100644
 --- a/zig/src/families/qwen27/cuda/native.zig
 +++ b/zig/src/families/qwen27/cuda/native.zig
-@@ -10,6 +10,13 @@ const wt = @import("weights.zig");
+@@ -1,4 +1,5 @@
+ //! Qwen3.5-family dense models on CUDA behind the native family interface (native/cuda.zig's registry).
++//! Changed 2026-11-13 for sut-tf: exports the prompt-state snapshot functions and the host-RAM cache size.
+ 
+ const std = @import("std");
+ const cuda = @import("cuda");
+@@ -10,6 +11,21 @@ const wt = @import("weights.zig");
  const engine = @import("engine.zig");
  const Lanes = @import("lanes.zig").Cuda;
  const dr = @import("draft.zig");
@@ -211,10 +249,18 @@ index b41a8c54..2019bb9b 100644
 +pub const snap_save = reuse.save;
 +pub const snap_restore = reuse.restore;
 +pub const snap_drop = reuse.drop;
++
++/// TF_QWEN27_HOST_CACHE_GIB: kept prompt states in this much pinned host memory (null: the card's spare memory).
++pub fn snap_host_bytes() ?u64 {
++    const v = getenv("TF_QWEN27_HOST_CACHE_GIB") orelse return null;
++    const gib = std.fmt.parseFloat(f64, v) catch return null;
++    if (!(gib > 0)) return null;
++    return @intFromFloat(gib * (1 << 30));
++}
  
  pub const model_type = "qwen3_5";
  pub const formats: []const []const u8 = &.{"mlx-q4g64"};
-@@ -38,9 +45,11 @@ pub const Loaded = struct {
+@@ -38,9 +54,11 @@ pub const Loaded = struct {
      ctx: *anyopaque,
      deinit: *const fn (*anyopaque) void,
      lone: ?LoneRun = null,
@@ -227,7 +273,15 @@ index b41a8c54..2019bb9b 100644
  
  /// The drafter the Python engine pairs with the 27B once pulled (z-lab/Qwen3.8-27B-DFlash2).
  const drafter_repo = "models--z-lab--Qwen3.8-27B-DFlash2";
-@@ -87,6 +96,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+@@ -72,6 +90,7 @@ const most_streams = 32;
+ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
+     // the 27B's glue runs the Python engine's Triton kernels, captured on this chip (no own glue kernels yet)
+     const streams: u32 = @max(1, @min(o.streams, st.max_streams));
++    reuse.host_tier = snap_host_bytes() != null;
+     // past 128K a 24 GB card needs the room: 1024-row prompt chunks (~10% slower reading) and the token table in host memory
+     if (o.context > 128 * 1024) {
+         prompt_rows = 1024;
+@@ -87,6 +106,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
      errdefer gpa.destroy(own);
      own.* = .{ .gpa = gpa, .e = e, .lanes = try Lanes.init(gpa, e, streams) };
      errdefer own.lanes.deinit();
@@ -235,7 +289,7 @@ index b41a8c54..2019bb9b 100644
      if (o.drafts) if (try drafterDir(gpa, io, o.drafter)) |draft_dir| {
          defer gpa.free(draft_dir);
          const f = e.forward();
-@@ -103,6 +113,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
+@@ -103,6 +123,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
          .stream_bytes = st.Seq.bytes(e.w.g, o.context) + if (own.draft != null) dr.Context.bytes() else 0,
          .ctx = own,
          .deinit = release,
@@ -245,12 +299,12 @@ index b41a8c54..2019bb9b 100644
  
 diff --git a/zig/src/families/qwen27/cuda/reuse.zig b/zig/src/families/qwen27/cuda/reuse.zig
 new file mode 100644
-index 00000000..60e25731
+index 00000000..4268d580
 --- /dev/null
 +++ b/zig/src/families/qwen27/cuda/reuse.zig
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,134 @@
 +//! Qwen3.8-27B CUDA prompt states for the shared cache: a stream's committed state after `at` prompt tokens.
-+//! Added 2026-11-13 for SUT-TF. Original engine: TensorFold (Apache-2.0); pattern: families/nemotron/cuda_reuse.zig.
++//! Added 2026-11-13 for sut-tf.
 +//!
 +//! A saved state holds each DeltaNet layer's recurrence and conv window, and only the first `at` rows of each
 +//! attention layer's keys and values (the caches grow by appending, so a prefix is a whole prefix). The DFlash2
@@ -265,11 +319,17 @@ index 00000000..60e25731
 +
 +const align_to = 256;
 +
-+/// One kept state: device copies packed in one buffer, and the prompt position they stand at.
++/// Kept states in pinned host memory instead of the card's (TF_QWEN27_HOST_CACHE_GIB, set when the model opens).
++pub var host_tier: bool = false;
++
++/// One kept state: copies packed in one buffer on the card or in pinned host memory, and the position they stand at.
 +pub const Copy = struct {
-+    buf: cuda.DeviceBuffer,
++    dev: ?cuda.DeviceBuffer = null,
++    host: ?cuda.HostBuffer = null,
 +    at: usize,
 +};
++
++const Where = union(enum) { dev: u64, host: []u8 };
 +
 +/// The lane backend whose streams the cache copies. The native host keeps one for the loaded model.
 +pub const Target = struct {
@@ -300,28 +360,37 @@ index 00000000..60e25731
 +
 +const Dir = enum { save, restore };
 +
-+/// Copy between the stream's live state and `base`, layer by layer, in the order stateBytes counts.
-+fn move(x: *Cuda, seq: *st.Seq, base: u64, at: usize, dir: Dir) !void {
++/// One region between the live state and the kept copy at `off`, in the direction asked.
++fn region(ops: anytype, to: Where, off: usize, live: u64, n: usize, dir: Dir) !void {
++    if (n == 0) return;
++    switch (to) {
++        .dev => |base| if (dir == .save) try ops.copy(base + off, live, n) else try ops.copy(live, base + off, n),
++        .host => |h| if (dir == .save) try ops.download(h[off..][0..n], live) else try ops.upload(live, h[off..][0..n]),
++    }
++}
++
++/// Copy between the stream's live state and the kept copy, layer by layer, in the order stateBytes counts.
++/// A host copy waits for its transfers, so a kept state is whole before anyone can drop it.
++fn move(x: *Cuda, seq: *st.Seq, to: Where, at: usize, dir: Dir) !void {
 +    const g = x.e.w.g;
 +    const ops = x.e.ops();
-+    var off: u64 = 0;
++    var off: usize = 0;
 +    for (0..g.layers) |i| {
 +        if (c.linear(i)) {
 +            const pairs = [_][2]u64{ .{ seq.rec[i], g.deltaBytes() }, .{ seq.conv[i], g.convBytes() } };
 +            for (pairs) |p| {
-+                if (dir == .save) try ops.copy(base + off, p[0], p[1]) else try ops.copy(p[0], base + off, p[1]);
-+                off += std.mem.alignForward(u64, p[1], align_to);
++                try region(ops, to, off, p[0], p[1], dir);
++                off += std.mem.alignForward(usize, p[1], align_to);
 +            }
 +        } else {
 +            const n = at * g.kvRow();
 +            for ([_]u64{ seq.keys[i], seq.values[i] }) |live| {
-+                if (n > 0) {
-+                    if (dir == .save) try ops.copy(base + off, live, n) else try ops.copy(live, base + off, n);
-+                }
-+                off += std.mem.alignForward(u64, n, align_to);
++                try region(ops, to, off, live, n, dir);
++                off += std.mem.alignForward(usize, n, align_to);
 +            }
 +        }
 +    }
++    if (to == .host) try ops.s.synchronize();
 +}
 +
 +/// Copy the stream's state after `at` prompt tokens into new device storage. The pass stands there.
@@ -332,10 +401,22 @@ index 00000000..60e25731
 +    if (seq.pos != at) return error.NotAtMark;
 +    const copy = try t.x.gpa.create(Copy);
 +    errdefer t.x.gpa.destroy(copy);
-+    copy.* = .{ .buf = try cuda.DeviceBuffer.alloc(t.x.e.ctx.d, stateBytes(t.x.e.w.g, at)), .at = at };
-+    errdefer copy.buf.free();
-+    try move(t.x, seq, copy.buf.ptr, at, .save);
++    copy.* = .{ .at = at };
++    const len = stateBytes(t.x.e.w.g, at);
++    if (host_tier) {
++        copy.host = try cuda.HostBuffer.alloc(t.x.e.ctx.d, len);
++        errdefer copy.host.?.free();
++        try move(t.x, seq, .{ .host = copy.host.?.bytes }, at, .save);
++    } else {
++        copy.dev = try cuda.DeviceBuffer.alloc(t.x.e.ctx.d, len);
++        errdefer copy.dev.?.free();
++        try move(t.x, seq, .{ .dev = copy.dev.?.ptr }, at, .save);
++    }
 +    return copy;
++}
++
++fn whereOf(copy: *Copy) Where {
++    return if (copy.host) |h| .{ .host = h.bytes } else .{ .dev = copy.dev.?.ptr };
 +}
 +
 +/// Make the stream's opened state `saved`'s: the next prompt chunk starts at its position.
@@ -345,18 +426,19 @@ index 00000000..60e25731
 +    const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoQwenStream));
 +    const seq = t.x.seqs.get(s) orelse return error.UnknownQwenStream;
 +    if (copy.at >= seq.capacity) return error.PromptTooLong;
-+    try move(t.x, seq, copy.buf.ptr, copy.at, .restore);
++    try move(t.x, seq, whereOf(copy), copy.at, .restore);
 +    seq.pos = copy.at;
 +}
 +
 +pub fn drop(ptr: *anyopaque, saved: *anyopaque) void {
 +    const t = of(ptr);
 +    const copy: *Copy = @ptrCast(@alignCast(saved));
-+    copy.buf.free();
++    if (copy.dev) |*d| d.free();
++    if (copy.host) |*h| h.free();
 +    t.x.gpa.destroy(copy);
 +}
 diff --git a/zig/src/native/cuda.zig b/zig/src/native/cuda.zig
-index 1a9a70bf..22aaca0d 100644
+index 1a9a70bf..71f0071e 100644
 --- a/zig/src/native/cuda.zig
 +++ b/zig/src/native/cuda.zig
 @@ -13,13 +13,18 @@ const Pool = budget.Pool;
@@ -371,7 +453,7 @@ index 1a9a70bf..22aaca0d 100644
 -    .drop = nemotron.native.snap_drop,
 -};
 +/// A family's prompt-cache copies. A container-level value per family, so the store's pointer stays valid for the
-+/// process. (Modified 2026-11-13 for SUT-TF: was Nemotron's alone; qwen27 now keeps prompt states too.)
++/// process. (Changed 2026-11-13 for sut-tf: each family supplies its own snapshot functions.)
 +fn snapsOf(comptime F: type) *const api.prompt_cache.Snapshots.VTable {
 +    return &struct {
 +        const v: api.prompt_cache.Snapshots.VTable = .{
@@ -385,7 +467,18 @@ index 1a9a70bf..22aaca0d 100644
  
  pub const backends: []const []const u8 = &.{"cuda"};
  pub const families: []const api.Family = blk: {
-@@ -445,7 +450,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
+@@ -435,7 +440,9 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
+     errdefer gpa.destroy(h);
+     h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = loaded.backend, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = loaded.lone };
+     // prompt-cache snapshots are Nemotron's (cuda_reuse.zig); a family without them serves without a cache
+-    const cache = if (@hasDecl(F, "snap_bytes")) budget.cacheBytes(o.prompt_cache_gib, room, loaded.stream_bytes * (streams -| free)) else 0;
++    // a family that keeps states in host memory sizes its cache there, not from the card's spare memory
++    const host_cache: ?u64 = if (@hasDecl(F, "snap_host_bytes")) F.snap_host_bytes() else null;
++    const cache = if (@hasDecl(F, "snap_bytes")) (host_cache orelse budget.cacheBytes(o.prompt_cache_gib, room, loaded.stream_bytes * (streams -| free))) else 0;
+     h.startup = try std.fmt.allocPrint(gpa, "CUDA sm_{d} device {d} ({s}{s}): model {d:.2} GiB{s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompts in {d}-row chunks{s}{s}; {s}", .{
+         capability,                                                                                                        device,                                                                                                       name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (loaded.learn_bytes > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(loaded.learn_bytes)}) else "", streams, if (streams == 1) "" else "s", toGib(loaded.stream_bytes), window, toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
+         if (cache > 0) try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache", .{toGib(cache)}) else ", no prompt cache", if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
+@@ -445,7 +452,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
          const pc = api.prompt_cache;
          const store = try gpa.create(pc.Store);
          // states kept and resumed on the family's grid, where a cache-off pass cuts; the head reads one token on

@@ -1,47 +1,52 @@
 # SUT-TF
 
-TensorFold fork for long-context retrieval accuracy on a single 24 GB GPU.
+**Screwed Up Tech's offsec inference recipe:** one RTX 3090 capped at 250 W, running an abliterated 27B model with a
+262,144-token window. Recon follow-ups come back in seconds, not minutes, and the model doesn't refuse pentest work.
 
-Phase 1 of the broader **ScrewDrive** engine project. SUT-TF is the fork;
-ScrewDrive is the eventual standalone multi-backend engine that will replace it.
-They are separate deliverables and will not be conflated.
+The point is the agent loop. You dump a big pile of recon (nmap, web logs, JS bundles, API docs) into context and
+then ask question after question about it. A stock engine re-reads the whole dump on every question. Ours saves the
+model state at the end of the dump into pinned host RAM and resumes from it. The resumed answers are bit-identical to
+re-reading the dump.
 
-## Scope (Phase 1)
+## Headline numbers
 
-> Measure context capacity, throughput, VRAM, and accuracy when retrieving
-> specific evidence from long HTTP logs, JavaScript bundles, and API
-> documentation. Then test one KV-cache modification. If it produces a
-> measurable improvement, publish the findings. If it doesn't, publish what we
-> learned.
+Everything below is one RTX 3090 at a 250 W power cap, one stream, abliterated Qwen3.8-27B at 4 bits, a 262K window,
+greedy decoding, and the offsec benchmark in [`benchmarks/`](benchmarks/). Full tables are in [RESULTS.md](RESULTS.md).
 
-Verbatim from the project owner. See `docs/SCOPE.md`.
+| Recon dump | First question (cold) | Every question after (warm) | Energy per follow-up |
+|---|---|---|---|
+| 32K tokens | 28.0 s | **2.0 s** | 0.48 kJ (cold: 6.3 kJ) |
+| 79K tokens | 84.1 s | **1.9 s** | 0.48 kJ (cold: 20.0 kJ) |
+| 128K tokens | 170.1 s | **1.2 s** | 0.34 kJ (cold: 40.1 kJ) |
+| 237K tokens | 447.9 s | **3.3 s** | 0.85 kJ (cold: 107.0 kJ) |
 
-Until we've built something that demonstrably improves performance or accuracy,
-we haven't earned the right to call it a better engine.
+| Check | Result |
+|---|---|
+| Find planted evidence among decoys | **23/24** |
+| Hallucination traps: asked for things that aren't there | **16/16** answered NOT_FOUND, nothing invented |
+| Drift: 20 questions in a row on one 79K dump | **18/20**, 9/10 in the first half and 9/10 in the second (no drift) |
+| Cached answer equals cold re-read answer | **10/10** identical token streams |
+| Pentest requests refused (reverse shell, SQLi, XSS) | **0/3** |
+| Decode speed | 100 / 85 / 52 / 37 tok/s at 32K / 79K / 128K / 237K |
+| Power | 223–239 W average, 254 W peak, 61 °C max |
 
-## Lineage
+The misses are real model errors and they repeat the same way with the cache on or off. At 128K the model picked a
+near-copy of the live API key (the request that got a 401). In the drift session it twice listed 9 of the 10 SMB hosts,
+dropping one and inventing none.
 
-- Upstream: [`ashhart/TensorFold`](https://github.com/ashhart/TensorFold) (Apache-2.0)
-- Immediate base: `machinegenieorg/TensorFold` with PR #836 (canonical Qwen CUDA
-  base, incorporates CanadaApollo6's 3090 kernel stack formerly branded "M3TiS")
-- License: Apache-2.0 inherited
+## What's in here
 
-See `docs/LINEAGE.md` for exact commits and attribution.
+| Path | What |
+|---|---|
+| [RECIPE.md](RECIPE.md) | Build it yourself: engine, patch, weights, config, benchmark |
+| [RESULTS.md](RESULTS.md) | Every step, every table, the misses, and the bug we caught |
+| [docs/METHOD.md](docs/METHOD.md) | How the benchmark builds its corpora and scores answers |
+| [patches/](patches/) | The engine patch: prompt cache, resumable prefill, pinned-RAM tier |
+| [configs/offsec.conf](configs/offsec.conf) | The serving config the numbers came from |
+| [tools/](tools/) | Weight conversion to the engine's 4-bit layout, plus the check that it worked |
+| [benchmarks/](benchmarks/) | Offsec benchmark, step runner, table builder, exactness gate, raw results |
+| [docker/](docker/) | Builder image (CUDA 12.4, Zig 0.17.0) |
 
-## Status
+## License
 
-Scaffolding only. No source code imported yet, no modifications made, no
-benchmarks run. Nothing here is faster or more accurate than upstream TensorFold.
-
-## Repo layout
-
-```
-docs/          Scope, lineage, measurement protocol, baseline numbers
-benchmarks/    Test harness, corpora generators, needle definitions, results
-docker/        CUDA + Zig dev container (built on aipwnlocal LXC 110)
-engine/        Reserved for the imported + patched TF source
-```
-
-## Reproducing anything here
-
-Instructions will land as each stage ships. Nothing to reproduce yet.
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
